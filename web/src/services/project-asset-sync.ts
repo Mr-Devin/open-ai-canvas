@@ -14,6 +14,7 @@ import { createLocalDreaminaTaskEffectStore } from "@/services/local-dreamina-ge
 import { createProviderNeutralGenerationTaskEffectStore } from "@/services/provider-neutral-generation-effects";
 import { saveRemoteUserDataNow } from "@/services/user-data-sync";
 import { getActiveUserScope } from "@/lib/user-scope";
+import { normalizeAssetCategory } from "@/lib/asset-category";
 import { runGenerationConsumer } from "@/services/generation-consumer-lifecycle";
 import { useAssetStore, type AssetCategory, type AssetStatus, type NewAsset } from "@/stores/use-asset-store";
 import type { CanvasNodeData } from "@/types/canvas";
@@ -70,7 +71,12 @@ async function persistCanvasNodeAsset(options: EnsureCanvasNodeAssetOptions): Pr
         store.updateAsset(asset.id, { category: declaredCategory });
         asset = useAssetStore.getState().assets.find((item) => item.id === asset?.id) || asset;
     }
-    if (!options.domainProjectId) return { assetId: asset.id, created, linkedToProject: false };
+    if (!options.domainProjectId) {
+        // 个人画布也必须在返回成功前把素材提交到服务端，不能只依赖延迟自动同步。
+        await saveRemoteUserDataNow();
+        throwIfAborted(options.signal);
+        return { assetId: asset.id, created, linkedToProject: false };
+    }
     await syncAssetToProject(asset.id, options.domainProjectId, declaredCategory, options.folderId, options.signal);
     return { assetId: asset.id, created, linkedToProject: true };
 }
@@ -92,7 +98,7 @@ async function syncAssetToProject(assetId: string, domainProjectId: string, cate
         domainProjectId,
         {
             assetId: asset.id,
-            category: category || asset.category || "other",
+            category: normalizeAssetCategory(category || asset.category),
             folderId,
         },
         signal,
@@ -102,7 +108,7 @@ async function syncAssetToProject(assetId: string, domainProjectId: string, cate
     if (folderId !== undefined && (linked.folderId || "") !== folderId) linked = (await moveProjectAsset(domainProjectId, asset.id, folderId, signal)).asset;
     throwIfAborted(signal);
     useAssetStore.getState().updateAsset(asset.id, {
-        category: linked.category as AssetCategory,
+        category: normalizeAssetCategory(linked.category),
         status: linked.status as AssetStatus,
         primaryVersionId: linked.primaryVersionId,
         metadata: { ...asset.metadata, projectIds: [...new Set([...linkedProjectIds, domainProjectId])] },

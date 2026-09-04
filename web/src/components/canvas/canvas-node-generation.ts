@@ -79,15 +79,16 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     assertResolvableGenerationMentions(prompt, mentionInputs);
     const hasExplicitResourceMention = hasResolvableGenerationMention(prompt, mentionInputs);
     const isWorkflowSource = sourceNode?.type === CanvasNodeType.Config && isCanvasWorkflowProvider(sourceNode.metadata);
-    if ((Boolean(sourceNode?.metadata?.composerContent?.trim()) && (sourceNode?.type === CanvasNodeType.Config || isWorkflowSource)) || hasExplicitResourceMention) {
+    const hasConnectedMedia = connectedInputs.some((input) => input.type === "image" || input.type === "video" || input.type === "audio" || input.type === "character");
+    if ((promptOnly && hasConnectedMedia) || (Boolean(sourceNode?.metadata?.composerContent?.trim()) && (sourceNode?.type === CanvasNodeType.Config || isWorkflowSource)) || hasExplicitResourceMention) {
         const autoIncludeWorkflowMedia = isWorkflowSource;
         return buildComposerGenerationContext(
             mentionInputs,
             prompt,
             // 工作流节点由字段映射接收全部连线媒体；视频节点的历史首尾帧字段不能再额外追加参考图。
-            autoIncludeWorkflowMedia ? [] : [sourceNode?.metadata?.videoStartFrameNodeId, sourceNode?.metadata?.videoEndFrameNodeId].filter((id): id is string => Boolean(id)),
+            autoIncludeWorkflowMedia || (promptOnly && hasConnectedMedia) ? [] : [sourceNode?.metadata?.videoStartFrameNodeId, sourceNode?.metadata?.videoEndFrameNodeId].filter((id): id is string => Boolean(id)),
             promptOnly,
-            autoIncludeWorkflowMedia,
+            autoIncludeWorkflowMedia || (promptOnly && hasConnectedMedia),
             connectedInputs,
         );
     }
@@ -181,7 +182,7 @@ function buildComposerGenerationContext(
                 if (input.type === "text") textBlocks.push(`【${label}】\n${input.text || ""}`);
                 else selectedInputs.push(input);
             }
-            nextPrompt += input.type === "text" ? `【${label}】` : label;
+            nextPrompt += input.type === "text" ? `【${label}】` : `@${label}`;
         } else nextPrompt += match[0];
         lastIndex = match.index + match[0].length;
     }

@@ -1,7 +1,9 @@
 import type { CanvasColorGrade } from "@/lib/canvas/canvas-color-grade";
+import type { AssetCategory } from "@/lib/asset-category";
 import type { PortraitTextureSettings } from "@/lib/canvas/canvas-portrait-texture";
 import type { StyleExecutionPlan } from "@/lib/canvas/style-profile";
 import type { PortraitClearanceNodeState } from "@/lib/portrait-clearance/contracts";
+import type { ArtCritiqueNodeState } from "@/lib/art-critique/contracts";
 import type { SrtEntry, SubtitleHighlight, SubtitleStyle } from "@/types/timeline";
 
 export type Position = {
@@ -256,7 +258,7 @@ export type CanvasNodeMetadata = {
     hasAudio?: boolean;
     assetId?: string;
     assetTags?: string[];
-    assetCategory?: "character" | "environment" | "wardrobe" | "prop" | "weapon" | "style" | "other";
+    assetCategory?: AssetCategory;
     workflowKind?: CanvasWorkflowKind;
     workflowTitle?: string;
     workflowDescription?: string;
@@ -339,6 +341,7 @@ export type CanvasNodeMetadata = {
     versionLabel?: string;
     versionPrimary?: boolean;
     copiedFromNodeId?: string;
+    generationResultPlacement?: "replace-node" | "new-version";
     directorSceneId?: string;
     directorShotId?: string;
     directorPreviewNodeId?: string;
@@ -417,6 +420,8 @@ export type CanvasNodeMetadata = {
     portraitTexture?: PortraitTextureSettings;
     /** 肖像排查节点只保存可恢复的 UI 状态，不保存图片、embedding 或完整结果。 */
     portraitClearance?: PortraitClearanceNodeState;
+    /** AI 审美批改节点只保存当前报告和输入指纹，不保存图片二进制。 */
+    artCritique?: ArtCritiqueNodeState;
 };
 
 export type CanvasNodeData = {

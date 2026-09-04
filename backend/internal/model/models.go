@@ -98,6 +98,12 @@ const (
 	ResourceStatusFailed  ResourceStatus = "failed"
 	ResourceStatusDeleted ResourceStatus = "deleted"
 
+	// 播放副本转码状态：空串/"none" = 无需转码（H.264 等可直接播放）。
+	PlaybackStatusNone       = "none"
+	PlaybackStatusProcessing = "processing"
+	PlaybackStatusReady      = "ready"
+	PlaybackStatusFailed     = "failed"
+
 	ResourceDeletionStatusPending    ResourceDeletionStatus = "pending"
 	ResourceDeletionStatusProcessing ResourceDeletionStatus = "processing"
 
@@ -119,6 +125,7 @@ const (
 	CreditLedgerAdminAdjust  CreditLedgerType = "admin_adjustment"
 	CreditLedgerSignupBonus  CreditLedgerType = "signup_bonus"
 	CreditLedgerCheckinBonus CreditLedgerType = "checkin_bonus"
+	CreditLedgerPaymentTopup CreditLedgerType = "payment_topup"
 
 	RedeemCodeUnused   RedeemCodeStatus = "unused"
 	RedeemCodeRedeemed RedeemCodeStatus = "redeemed"
@@ -144,10 +151,8 @@ const (
 
 	AssetCategoryCharacter   AssetCategory = "character"
 	AssetCategoryEnvironment AssetCategory = "environment"
-	AssetCategoryWardrobe    AssetCategory = "wardrobe"
 	AssetCategoryProp        AssetCategory = "prop"
-	AssetCategoryWeapon      AssetCategory = "weapon"
-	AssetCategoryStyle       AssetCategory = "style"
+	AssetCategoryMaterial    AssetCategory = "material"
 	AssetCategoryOther       AssetCategory = "other"
 
 	AssetVersionStatusDraft     AssetVersionStatus = "draft"

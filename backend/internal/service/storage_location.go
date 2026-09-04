@@ -2,10 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"infinite-canvas/backend/internal/model"
 
+	"github.com/tencentyun/cos-go-sdk-v5"
 	"gorm.io/gorm"
 )
 
@@ -22,6 +25,8 @@ type OSSConnectionTestResult struct {
 	TestedAt     time.Time `json:"testedAt"`
 	TestedDigest string    `json:"testedDigest"`
 }
+
+var errOSSConnectionReadMismatch = errors.New("对象存储读取内容不一致")
 
 func (s *Service) TestAdminOSSSetting(actor *model.User, req OSSSettingRequest) (*OSSConnectionTestResult, error) {
 	if err := s.RequireAdmin(actor); err != nil {
@@ -76,26 +81,8 @@ func (s *Service) testOSSSetting(scope string, ownerID string, actorID string, r
 	}()
 
 	testKey := path.Join(value.PathPrefix, ".yingce-tests", scope, newID())
-	payload := []byte("yingce-storage-test")
-	if _, err := putOSSObject(value, testKey, "application/octet-stream", int64(len(payload)), bytes.NewReader(payload)); err != nil {
+	if err := verifyOSSConnection(value, testKey); err != nil {
 		return nil, err
-	}
-	stream, err := getOSSObjectRange(value, testKey, "bytes=0-3")
-	var rangeErr error
-	if err != nil {
-		rangeErr = err
-	} else {
-		data, readErr := io.ReadAll(io.LimitReader(stream.body, 5))
-		closeErr := stream.body.Close()
-		if readErr != nil || closeErr != nil || string(data) != "ying" {
-			rangeErr = errors.New("对象存储 Range 读取测试失败")
-		}
-	}
-	if err := deleteOSSObject(value, testKey); err != nil {
-		return nil, fmt.Errorf("对象存储删除测试失败：%w", err)
-	}
-	if rangeErr != nil {
-		return nil, rangeErr
 	}
 
 	location, err := s.upsertStorageLocation(scope, ownerID, value)
@@ -109,6 +96,106 @@ func (s *Service) testOSSSetting(scope string, ownerID string, actorID string, r
 		return nil, err
 	}
 	return &OSSConnectionTestResult{OK: true, Message: "连接测试通过", TestedAt: now, TestedDigest: location.TestedDigest}, nil
+}
+
+func verifyOSSConnection(value ossSettingValue, testKey string) error {
+	payload := []byte("yingce-storage-test")
+	// 连接测试验证服务端到对象存储的真实读写权限。CDN 是浏览器读取出口，
+	// 可能存在回源鉴权或边缘同步延迟，不能参与刚写入对象的最小读写测试。
+	testValue := value
+	testValue.CDNBaseURL = ""
+	if _, err := putOSSObject(testValue, testKey, "application/octet-stream", int64(len(payload)), bytes.NewReader(payload)); err != nil {
+		return storageConnectionTestError(testValue.Provider, "写入", err)
+	}
+	stream, err := getOSSObjectRange(testValue, testKey, "bytes=0-3")
+	var rangeErr error
+	if err != nil {
+		rangeErr = err
+	} else {
+		rangeErr = verifyOSSConnectionRead(stream, payload)
+	}
+	if err := deleteOSSObject(testValue, testKey); err != nil {
+		return storageConnectionTestError(testValue.Provider, "删除", err)
+	}
+	if rangeErr != nil {
+		return storageConnectionTestError(testValue.Provider, "Range 读取", rangeErr)
+	}
+	return nil
+}
+
+func verifyOSSConnectionRead(stream *ossObjectStream, payload []byte) error {
+	if stream == nil || stream.body == nil {
+		return fmt.Errorf("%w：响应为空", errOSSConnectionReadMismatch)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(stream.body, int64(len(payload)+1)))
+	closeErr := stream.body.Close()
+	if readErr != nil {
+		return fmt.Errorf("对象存储响应读取失败：%w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("对象存储响应关闭失败：%w", closeErr)
+	}
+
+	// HTTP 允许服务端忽略 Range 并返回 200 + 完整对象。应用的资源代理也会
+	// 原样透传这种响应，因此连接测试应同时接受完整读取与标准的 206 分段读取。
+	switch stream.statusCode {
+	case http.StatusPartialContent:
+		if len(payload) >= 4 && bytes.Equal(data, payload[:4]) {
+			return nil
+		}
+	case http.StatusOK:
+		if bytes.Equal(data, payload) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w（HTTP %d，读取 %d 字节）", errOSSConnectionReadMismatch, stream.statusCode, len(data))
+}
+
+func storageConnectionTestError(provider string, operation string, cause error) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	providerName := "对象存储"
+	switch provider {
+	case aliyunOSSProvider:
+		providerName = "阿里云 OSS"
+	case tencentCOSProvider:
+		providerName = "腾讯云 COS"
+	case qiniuKodoProvider:
+		providerName = "七牛云 Kodo"
+	case s3Provider:
+		providerName = "S3 兼容存储"
+	}
+
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return WrapAppError(http.StatusGatewayTimeout, fmt.Sprintf("%s %s测试超时，请检查 Endpoint 和服务端网络", providerName, operation), cause)
+	}
+	var networkErr net.Error
+	if errors.As(cause, &networkErr) && networkErr.Timeout() {
+		return WrapAppError(http.StatusGatewayTimeout, fmt.Sprintf("%s %s测试超时，请检查 Endpoint 和服务端网络", providerName, operation), cause)
+	}
+	if operation == "Range 读取" && errors.Is(cause, errOSSConnectionReadMismatch) {
+		return WrapAppError(http.StatusBadGateway, fmt.Sprintf("%s Range 读取返回的数据与刚写入对象不一致，请检查 Endpoint 或出网代理是否忽略、改写了 Range 请求", providerName), cause)
+	}
+
+	if provider == tencentCOSProvider {
+		var responseErr *cos.ErrorResponse
+		if errors.As(cause, &responseErr) && responseErr.Response != nil {
+			switch responseErr.Response.StatusCode {
+			case http.StatusBadRequest, http.StatusUnprocessableEntity:
+				return WrapAppError(http.StatusBadGateway, fmt.Sprintf("腾讯云 COS %s请求被拒绝，请检查 Bucket、Region 和 Endpoint", operation), cause)
+			case http.StatusUnauthorized, http.StatusForbidden:
+				return WrapAppError(http.StatusBadGateway, fmt.Sprintf("腾讯云 COS %s鉴权失败，请检查 SecretId、SecretKey 和 Bucket 权限", operation), cause)
+			case http.StatusNotFound:
+				return WrapAppError(http.StatusBadGateway, fmt.Sprintf("腾讯云 COS %s未找到 Bucket，请检查 Bucket、Region 和 Endpoint", operation), cause)
+			case http.StatusTooManyRequests:
+				return WrapAppError(http.StatusBadGateway, fmt.Sprintf("腾讯云 COS %s请求过于频繁，请稍后重试", operation), cause)
+			}
+			if responseErr.Response.StatusCode >= http.StatusInternalServerError {
+				return WrapAppError(http.StatusBadGateway, fmt.Sprintf("腾讯云 COS %s服务暂时不可用，请稍后重试", operation), cause)
+			}
+		}
+	}
+
+	return WrapAppError(http.StatusBadGateway, fmt.Sprintf("%s %s测试失败，请检查 Endpoint、Bucket、访问密钥和存储桶权限", providerName, operation), cause)
 }
 
 func (s *Service) upsertStorageLocation(scope string, ownerID string, value ossSettingValue) (*model.StorageLocation, error) {
