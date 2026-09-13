@@ -126,6 +126,20 @@ add({
   response: { status: "succeeded", textPaths: ["choices.0.message.content", "choices.0.text"], reasoningPaths: ["choices.0.message.reasoning_content"], usage: ref("response.usage"), errorPaths: ["error.code"], messagePaths: ["error.message"] }
 });
 
+// Responses API 的原始 REST 响应没有 output_text：那是官方 SDK 合成的便利字段，直接
+// HTTP 调用拿不到。正文在 output[].content[].text，且思考型模型的 reasoning 项会排在
+// message 项前面，固定下标会取错项，所以按 type 过滤后逐项收集正文。每个 message 收集
+// content 里各分片的 text，宿主在「表达式结果 → 文本」处按顺序展平拼接，没有 text 的
+// 片段会被丢弃。
+const responsesText = coalesce(
+  ref("response.output_text"),
+  map(
+    filter(ref("response.output"), "item", eq(ref("item.type"), "message")),
+    "item",
+    map(ref("item.content"), "part", ref("part.text"))
+  )
+);
+
 add({
   id: "openai-responses", providerId: "openai-response", name: "OpenAI Responses", vendor: "OpenAI", capability: "text",
   baseUrl: "https://api.openai.com", auth: bearer, params: textParams,
@@ -144,8 +158,8 @@ add({
     user: omit(ref("request.providerOptions.openai-response.user"))
   }),
   agent: jsonCreate("/responses", { $merge: [ref("request.extra.agent.responses"), { model: ref("request.model") }] }),
-  agentResponse: { textPaths: ["output_text"], reasoningPaths: ["reasoning.summary.0.text"], toolCallsPath: "output", toolCallIdPaths: ["call_id", "id"], toolCallNamePaths: ["name"], toolCallArgumentsPaths: ["arguments"] },
-  response: { status: "succeeded", textPaths: ["output_text"], reasoningPaths: ["reasoning.summary.0.text"], usage: ref("response.usage"), errorPaths: ["error.code"], messagePaths: ["error.message"] }
+  agentResponse: { text: responsesText, textPaths: ["output_text"], reasoningPaths: ["reasoning.summary.0.text"], toolCallsPath: "output", toolCallIdPaths: ["call_id", "id"], toolCallNamePaths: ["name"], toolCallArgumentsPaths: ["arguments"] },
+  response: { status: "succeeded", text: responsesText, textPaths: ["output_text"], reasoningPaths: ["reasoning.summary.0.text"], usage: ref("response.usage"), errorPaths: ["error.code"], messagePaths: ["error.message"] }
 });
 
 add({

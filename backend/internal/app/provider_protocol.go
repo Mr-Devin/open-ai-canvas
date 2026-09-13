@@ -96,7 +96,7 @@ func runProtocolAdapterTaskWithTiming(ctx context.Context, input canvasGeneratio
 			return nil, protocolResultError(created.Message, taskID)
 		}
 		if created.Status == protocol.StatusSucceeded {
-			return finishProtocolAdapterResult(ctx, input, adapter, request, taskID, created.Result)
+			return finishProtocolAdapterResult(ctx, input, adapter, request, taskID, created.Result, body)
 		}
 		if taskID == "" {
 			return nil, errors.New("声明式协议创建请求没有返回任务 ID")
@@ -149,7 +149,7 @@ func runProtocolAdapterTaskWithTiming(ctx context.Context, input canvasGeneratio
 		}
 		switch state.Status {
 		case protocol.StatusSucceeded:
-			return finishProtocolAdapterResult(ctx, input, adapter, request, taskID, state.Result)
+			return finishProtocolAdapterResult(ctx, input, adapter, request, taskID, state.Result, body)
 		case protocol.StatusFailed, protocol.StatusCancelled:
 			return nil, protocolResultError(state.Message, taskID)
 		}
@@ -220,7 +220,7 @@ func queryProtocolAdapterVideoTask(ctx context.Context, input canvasGenerationIn
 	providerStatus := string(state.Status)
 	switch state.Status {
 	case protocol.StatusSucceeded:
-		result, err := finishProtocolAdapterResult(ctx, input, adapter, request, taskID, state.Result)
+		result, err := finishProtocolAdapterResult(ctx, input, adapter, request, taskID, state.Result, body)
 		return result, providerStatus, err
 	case protocol.StatusFailed, protocol.StatusCancelled:
 		return nil, providerStatus, protocolResultError(state.Message, taskID)
@@ -799,9 +799,13 @@ func appendProtocolQuery(rawURL string, values map[string][]string) (string, err
 	return parsed.String(), nil
 }
 
+// errProtocolResultEmpty 表示上游确实没有可解析的响应内容。
+// 「响应非空但没命中插件声明的结果路径」是另一回事，见 protocolMissingResultError。
+var errProtocolResultEmpty = errors.New("声明式协议已完成但没有返回结果")
+
 func finishProtocolResult(ctx context.Context, config providerConfig, mode string, result *protocol.Result) (map[string]interface{}, error) {
 	if result == nil {
-		return nil, errors.New("声明式协议已完成但没有返回结果")
+		return nil, errProtocolResultEmpty
 	}
 	if mode == "text" {
 		output := map[string]interface{}{"mode": "text", "text": result.Text}
@@ -846,14 +850,14 @@ func finishProtocolResult(ctx context.Context, config providerConfig, mode strin
 // finishProtocolAdapterResult 优先消费 create/poll 已返回的内联或 URL 结果，只有插件明确声明独立结果端点时才下载。
 // 空响应或下载失败必须向上失败，不能生成伪素材；application/octet-stream 仅表示传输层未知类型，
 // 不会把未知内容伪装成具体图片、视频或音频 MIME。
-func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInput, adapter protocol.Adapter, request protocol.GenerationRequest, taskID string, result *protocol.Result) (map[string]interface{}, error) {
+func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInput, adapter protocol.Adapter, request protocol.GenerationRequest, taskID string, result *protocol.Result, body []byte) (map[string]interface{}, error) {
 	if protocolResultHasOutput(input.Mode, result) {
 		return finishProtocolResult(ctx, input.Config, input.Mode, result)
 	}
 	resultAdapter, ok := adapter.(protocol.ResultAdapter)
 	capability, hasCapability := adapter.(protocol.ResultCapability)
 	if !ok || !hasCapability || !capability.ResultAvailable() {
-		return finishProtocolResult(ctx, input.Config, input.Mode, result)
+		return nil, protocolMissingResultError(input.Config.InterfaceType, body)
 	}
 	spec, err := resultAdapter.BuildResult(ctx, protocol.PollContext{BaseURL: input.Config.BaseURL, Model: request.Model, Request: request, TaskID: taskID})
 	if err != nil {
@@ -883,6 +887,48 @@ func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInpu
 		return nil, fmt.Errorf("声明式协议结果下载不支持生成模式 %s", input.Mode)
 	}
 	return finishProtocolResult(ctx, input.Config, input.Mode, downloaded)
+}
+
+// protocolMissingResultError 把「协议已完成但没有结果」拆成两种可区分的故障：
+// 上游确实返回空响应，还是响应体非空、却没有任何字段命中插件声明的结果路径。
+// 后者不是「模型没返回内容」，而是接口的响应映射与真实线上协议不一致；只说
+// 「没有返回结果」会把它误判成模型侧问题，只能靠翻请求日志反推，所以这里带上
+// 接口类型和响应外形（字节数 + 顶层字段名）。正文本身可能含用户内容或供应商
+// 诊断信息，只参与判定，不回显到错误信息里。
+func protocolMissingResultError(interfaceType string, body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return errProtocolResultEmpty
+	}
+	label := strings.TrimSpace(interfaceType)
+	if label == "" {
+		label = "当前接口"
+	}
+	return fmt.Errorf("声明式协议已完成，但响应没有命中 %s 声明的结果映射（%s）；请核对该接口的响应路径配置，原始响应见调用日志 responseBody", label, protocolResponseShape(trimmed))
+}
+
+// protocolResponseShape 只输出响应的外形摘要，用于判断映射是否匹配，不泄露正文。
+func protocolResponseShape(body []byte) string {
+	var decoded any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return fmt.Sprintf("%d 字节，非 JSON 响应", len(body))
+	}
+	payload, isObject := decoded.(map[string]any)
+	if !isObject {
+		return fmt.Sprintf("%d 字节，JSON 顶层不是对象", len(body))
+	}
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return fmt.Sprintf("%d 字节，JSON 对象没有字段", len(body))
+	}
+	sort.Strings(keys)
+	if len(keys) > 8 {
+		return fmt.Sprintf("%d 字节，顶层字段 %s…", len(body), strings.Join(keys[:8], "、"))
+	}
+	return fmt.Sprintf("%d 字节，顶层字段 %s", len(body), strings.Join(keys, "、"))
 }
 
 func protocolResultHasOutput(mode string, result *protocol.Result) bool {

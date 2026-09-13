@@ -5,6 +5,24 @@ description: 当前项目已实现功能的手工验证清单与未确认边界
 
 # 待测试
 
+## 声明式协议「已完成但没有结果」的修复与错误分层
+
+上游返回了正文却报「声明式协议已完成但没有返回结果」。根因有三条：一是声明式插件的 `response.status` 多为常量 `succeeded`，正文只靠 `textPaths` 抽取，而抽取只认字符串，`content` 为分片数组（`[{type:"text",text:…}]`）时被判成空结果；二是 `openai-response` 插件只声明了 `output_text`，那是官方 SDK 合成的便利字段，原始 REST 响应里没有，正文实际在 `output[].content[].text`（思考型模型的 reasoning 项还会排在 message 项前面，固定下标取不到）；三是结果为空时的报错与真正的空响应无法区分，只能翻 `api_call_logs.response_body` 反推。
+
+- 正文与推理摘要改用 `firstPathText` / `manifestTextContent`，接受字符串与分片数组两种合法形状（同一线协议内）并按顺序拼接；声明式 Agent 响应的 `Text` 同样走该抽取。只兼容正文形状，不猜测其他字段名或网关信封。
+- `openai-responses` 插件改为用 `response.text` / `agentResponse.text` 表达式按 `output[].type == "message"` 过滤后逐项收集 `content[].text`，并保留 `output_text` 作为网关补全时的首选。
+- `ManifestAgentResponse` 增加 `text` / `reasoning` 表达式字段（与 `ManifestResponse` 对齐）；`manifestResponseString` 在「表达式结果 → 文本」收口处展平嵌套数组，表达式语言没有 join/flatten 算子，不展平会把正文写成 `["回答"]`。
+- `finishProtocolAdapterResult` 带上响应体判定：空响应保持原文案，非空响应改为「响应没有命中 <接口类型> 声明的结果映射（字节数，顶层字段 …）」并指向调用日志。诊断只输出响应外形，不回显正文，避免把用户内容或供应商诊断信息写进任务错误。
+- 文本模式只有推理没有正文时不再返回空文本的「成功」，与图片/视频/音频的失败语义一致。
+
+- [x] `cd backend && go test ./internal/protocol/ -run 'TestFirstPathText|TestOfficialResponses' -count=1`
+- [x] `cd backend && go test ./internal/app/ -run 'TestProtocolResultExtractionAndDiagnostics|TestProtocolMissingResultErrorReportsShape' -count=1`
+- [x] `cd backend && go test ./internal/app/ ./internal/prompts/ ./internal/generation/ -count=1`（`./internal/protocol` 全量仅剩既有失败：付费插件产物在 git 中以 `100644` 跟踪、缺少可执行位）
+- [ ] 用 `openai-response` 渠道真实生成一次：应直接出结果。插件包随后端镜像发布，非支付类 `.yingce-plugin` 直接取自仓库，因此必须重建后端镜像；重启时 `bootstrapBuiltInPlugins` 会按新哈希重新播种官方插件并保留启用状态，无需重新安装插件。
+- [ ] 用会返回分片数组正文（`content: [{type:"text",...}]`）的真实渠道生成一次：应直接出结果，不再报「已完成但没有返回结果」。
+- [ ] 用返回网关信封（正文在 `data.choices…`）的真实渠道触发一次：应报「响应没有命中 … 声明的结果映射」并点名顶层字段 `code`、`data`，而不是「没有返回结果」；该类网关按插件兼容边界需要独立插件。
+- [ ] 用正常返回字符串 `choices[0].message.content` 的渠道回归一次：文本生成仍成功，不受新分支影响。
+
 ## 画布图片资源缓存链路优化
 
 消除首屏满屏转圈与"一直在下载"：后端图片资源改 30 天磁盘强缓存（`Cache-Control: max-age=2592000`），前端内存防抖 IndexedDB 元数据写入、O(1) 淘汰预检、并发下载 4→16，视口内远程图片直链首帧上屏（走原生磁盘缓存秒开），Blob 缓存后台平滑升级。已编译通过，需浏览器最终确认：

@@ -85,11 +85,13 @@
 | 映射位置 | 上游路径或转换表达式 |
 | --- | --- |
 | `response.status` | `"succeeded"` |
+| `response.text` | `{"$coalesce":[{"$ref":"response.output_text"},{"$map":{"from":{"$filter":{"from":{"$ref":"response.output"},"as":"item","where":{"$eq":[{"$ref":"item.type"},"message"]}}},"as":"item","in":{"$map":{"from":{"$ref":"item.content"},"as":"part","in":{"$ref":"part.text"}}}}}]}` |
 | `response.textPaths[0]` | `"output_text"` |
 | `response.reasoningPaths[0]` | `"reasoning.summary.0.text"` |
 | `response.usage` | `{"$ref":"response.usage"}` |
 | `response.errorPaths[0]` | `"error.code"` |
 | `response.messagePaths[0]` | `"error.message"` |
+| `agentResponse.text` | `{"$coalesce":[{"$ref":"response.output_text"},{"$map":{"from":{"$filter":{"from":{"$ref":"response.output"},"as":"item","where":{"$eq":[{"$ref":"item.type"},"message"]}}},"as":"item","in":{"$map":{"from":{"$ref":"item.content"},"as":"part","in":{"$ref":"part.text"}}}}}]}` |
 | `agentResponse.textPaths[0]` | `"output_text"` |
 | `agentResponse.reasoningPaths[0]` | `"reasoning.summary.0.text"` |
 | `agentResponse.toolCallsPath` | `"output"` |
@@ -349,6 +351,45 @@
         },
         "response": {
           "status": "succeeded",
+          "text": {
+            "$coalesce": [
+              {
+                "$ref": "response.output_text"
+              },
+              {
+                "$map": {
+                  "from": {
+                    "$filter": {
+                      "from": {
+                        "$ref": "response.output"
+                      },
+                      "as": "item",
+                      "where": {
+                        "$eq": [
+                          {
+                            "$ref": "item.type"
+                          },
+                          "message"
+                        ]
+                      }
+                    }
+                  },
+                  "as": "item",
+                  "in": {
+                    "$map": {
+                      "from": {
+                        "$ref": "item.content"
+                      },
+                      "as": "part",
+                      "in": {
+                        "$ref": "part.text"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
           "textPaths": [
             "output_text"
           ],
@@ -366,6 +407,45 @@
           ]
         },
         "agentResponse": {
+          "text": {
+            "$coalesce": [
+              {
+                "$ref": "response.output_text"
+              },
+              {
+                "$map": {
+                  "from": {
+                    "$filter": {
+                      "from": {
+                        "$ref": "response.output"
+                      },
+                      "as": "item",
+                      "where": {
+                        "$eq": [
+                          {
+                            "$ref": "item.type"
+                          },
+                          "message"
+                        ]
+                      }
+                    }
+                  },
+                  "as": "item",
+                  "in": {
+                    "$map": {
+                      "from": {
+                        "$ref": "item.content"
+                      },
+                      "as": "part",
+                      "in": {
+                        "$ref": "part.text"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
           "textPaths": [
             "output_text"
           ],

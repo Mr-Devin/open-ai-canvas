@@ -63,8 +63,13 @@ type ManifestResponse struct {
 // tool-capable text request. Tool call paths are resolved against each item in
 // ToolCallsPath.
 type ManifestAgentResponse struct {
-	TextPaths              []string `json:"textPaths,omitempty"`
-	ReasoningPaths         []string `json:"reasoningPaths,omitempty"`
+	TextPaths      []string `json:"textPaths,omitempty"`
+	ReasoningPaths []string `json:"reasoningPaths,omitempty"`
+	// Text/Reasoning 与 ManifestResponse 对齐，允许用表达式描述正文位置。有些协议的
+	// 正文不在固定下标上（Responses 的 output[] 会把 reasoning 项排在 message 项前面，
+	// 而原始响应没有 SDK 才有的 output_text），只靠固定路径无法表达。
+	Text                   any      `json:"text,omitempty"`
+	Reasoning              any      `json:"reasoning,omitempty"`
 	ToolCallsPath          string   `json:"toolCallsPath,omitempty"`
 	ToolCallIDPaths        []string `json:"toolCallIdPaths,omitempty"`
 	ToolCallNamePaths      []string `json:"toolCallNamePaths,omitempty"`
@@ -475,7 +480,14 @@ func (a manifestAdapter) ParseAgent(_ context.Context, body []byte) (AgentResult
 		return AgentResult{}, err
 	}
 	response := a.manifest.AgentResponse
-	result := AgentResult{Text: firstPathValue(payload, response.TextPaths...), Reasoning: firstPathValue(payload, response.ReasoningPaths...)}
+	env := map[string]any{"response": payload}
+	result := AgentResult{Text: manifestResponseString(response.Text, env), Reasoning: manifestResponseString(response.Reasoning, env)}
+	if result.Text == "" {
+		result.Text = firstPathText(payload, response.TextPaths...)
+	}
+	if result.Reasoning == "" {
+		result.Reasoning = firstPathText(payload, response.ReasoningPaths...)
+	}
 	if response.ToolCallsPath == "" {
 		return result, nil
 	}
@@ -600,10 +612,10 @@ func (a manifestAdapter) parse(payload map[string]any, c PollContext) CreateResu
 		Reasoning: manifestResponseString(response.Reasoning, env),
 	}
 	if result.Text == "" {
-		result.Text = firstPathValue(payload, response.TextPaths...)
+		result.Text = firstPathText(payload, response.TextPaths...)
 	}
 	if result.Reasoning == "" {
-		result.Reasoning = firstPathValue(payload, response.ReasoningPaths...)
+		result.Reasoning = firstPathText(payload, response.ReasoningPaths...)
 	}
 	result.Images = manifestResponseMedia(response.Images, env, "image", response.ResultEphemeral)
 	result.Videos = manifestResponseMedia(response.Videos, env, "video", response.ResultEphemeral)
@@ -662,10 +674,24 @@ func manifestResponseString(template any, env map[string]any) string {
 	if err != nil {
 		return ""
 	}
-	items := manifestArray(value)
+	return manifestTextFragments(value)
+}
+
+// manifestTextFragments 把表达式结果收敛成文本：数组按顺序展开，嵌套数组同样展开
+// （插件用嵌套 $map 逐层收集分片正文时会得到数组的数组），标量走 manifestString，
+// 空片段丢弃。表达式语言没有 join/flatten 算子，这里是「表达式结果 → 文本」的唯一
+// 收口；不展开的话嵌套数组会被 JSON 编码进正文（例如 "[\"回答\"]"）。
+func manifestTextFragments(value any) string {
+	items, isArray := value.([]any)
+	if !isArray {
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(manifestString(value))
+	}
 	parts := make([]string, 0, len(items))
 	for _, item := range items {
-		if text := strings.TrimSpace(manifestString(item)); text != "" {
+		if text := manifestTextFragments(item); text != "" {
 			parts = append(parts, text)
 		}
 	}
@@ -1271,6 +1297,45 @@ func firstPathValue(payload map[string]any, paths ...string) string {
 		}
 	}
 	return ""
+}
+
+// firstPathText 供正文与推理摘要使用：在 firstPathValue 之外接受 OpenAI Chat Completions
+// 的分片正文形状（content 为 [{"type":"text","text":"…"}] 而不是字符串）。模型确实返回了
+// 分片正文时，只认字符串会把整段回答判成空结果，最终报成「已完成但没有返回结果」。
+// 这里只兼容同一线协议内的正文形状，不猜测其他字段名或网关信封。
+func firstPathText(payload map[string]any, paths ...string) string {
+	for _, path := range paths {
+		if text := manifestTextContent(pathValue(payload, path)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// manifestTextContent 把正文值规整为字符串：字符串原样返回，分片数组按顺序拼接其中
+// 每个带 text 的片段。数字、对象和 null 都不算正文，避免把结构化字段误当回答。
+func manifestTextContent(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			switch entry := item.(type) {
+			case string:
+				if text := strings.TrimSpace(entry); text != "" {
+					parts = append(parts, text)
+				}
+			case map[string]any:
+				if text, ok := entry["text"].(string); ok && strings.TrimSpace(text) != "" {
+					parts = append(parts, strings.TrimSpace(text))
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
+	}
 }
 
 func manifestError(payload map[string]any, paths ...string) bool {
